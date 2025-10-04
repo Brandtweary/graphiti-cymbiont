@@ -1086,10 +1086,8 @@ async def delete_episode(uuid: str) -> SuccessResponse | ErrorResponse:
         # Use cast to help the type checker understand that graphiti_client is not None
         client = cast(Graphiti, graphiti_client)
 
-        # Get the episodic node by UUID - EpisodicNode is already imported at the top
-        episodic_node = await EpisodicNode.get_by_uuid(client.driver, uuid)
-        # Delete the node using its delete method
-        await episodic_node.delete(client.driver)
+        # Use Graphiti's remove_episode method which properly cleans up orphaned nodes/edges
+        await client.remove_episode(uuid)
         return SuccessResponse(message=f'Episode with UUID {uuid} deleted successfully')
     except Exception as e:
         error_msg = str(e)
