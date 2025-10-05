@@ -525,13 +525,21 @@ class MCPConfig(BaseModel):
 # Configure logging to both stderr and file
 log_file = '/home/brandt/projects/hector/mcp_debug.log'
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stderr),
         logging.FileHandler(log_file, mode='w')  # 'w' = overwrite each run
     ]
 )
+
+# Silence noisy third-party library loggers to prevent stderr spam
+logging.getLogger('watchdog').setLevel(logging.WARNING)
+logging.getLogger('neo4j').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('openai').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 logger.info("=" * 80)
 logger.info("MCP SERVER STARTED - CODE VERSION: metadata-field-v2")

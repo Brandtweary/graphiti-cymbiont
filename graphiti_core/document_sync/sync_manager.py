@@ -248,15 +248,16 @@ class DocumentSyncManager:
                     old_content = full_sync_episode.content
                     diff_content = generate_unified_diff(old_content, content, uri)
 
-                    # Summarize the diff for ingestion (LLMs can't resist context lines)
+                    # Summarize the diff for ingestion
+                    # The diff summarizer intelligently produces atomic content
                     summary = await summarize_diff(
                         self.graphiti.llm_client,
                         diff_content,
                         uri,
                     )
 
-                    # Prefix with document URI for ingestion context
-                    episode_body = f'Document: {uri}\n\n{summary}'
+                    # Pass diff summarizer output directly - it's already atomic and ready
+                    episode_body = summary
                     sync_type = 'diff'
 
                     # Update full sync episode with new content (mutation for snapshot)

@@ -34,8 +34,8 @@ class Versions:
 
 
 def summarize_diff(context: dict[str, Any]) -> list[Message]:
-    sys_prompt = """You are an AI assistant that summarizes document changes from unified diffs.
-    Your task is to produce clear, semantic descriptions of what changed in a document."""
+    sys_prompt = """You are an AI assistant that extracts new content from document diffs.
+    Reproduce the added content directly, as it would appear in a knowledge base."""
 
     user_prompt = f"""
 <DOCUMENT URI>
@@ -46,15 +46,54 @@ def summarize_diff(context: dict[str, Any]) -> list[Message]:
 {context['diff_content']}
 </UNIFIED DIFF>
 
-Analyze the unified diff above and produce a semantic summary of what changed.
+Extract the new content from this diff. Your output will be used directly for knowledge graph ingestion.
 
-Guidelines:
-1. Start the summary with the document name (e.g., "In api_design.md, ...")
-2. Describe what was added, removed, or modified
-3. Include document structure context (section names, headings) when helpful
+For ADDITIONS: Copy the new content verbatim, preserving its original phrasing and tense. Only add surrounding context if the new text contains referential words (however, this, that, it, them) that need disambiguation.
 
-Example output:
-"In test_sync.md, added Feature 7 (zero-context diff isolation) to the feature list under the Version 1 section."
+For DELETIONS: If content was genuinely removed (not just reformatted), describe what was deleted: "[Content description] was removed from {context['document_uri']}"
+
+If the same content appears in both additions and deletions (common with formatting changes), ignore the deletion completely.
+
+Examples:
+
+Example 1 - Simple addition:
+Diff:
++Mars has two moons named Phobos and Deimos.
+
+Your output:
+Mars has two moons named Phobos and Deimos.
+
+Example 2 - Addition with context needed:
+Diff:
+ The Great Wall of China was built over many centuries.
++However, most of the existing structure dates from the Ming Dynasty.
+ It stretches over 13,000 miles.
+
+Your output:
+The Great Wall of China's existing structure dates mostly from the Ming Dynasty.
+
+Example 3 - Multiple additions:
+Diff:
++Jupiter is the largest planet in our solar system.
++Saturn is known for its prominent ring system.
+
+Your output:
+Jupiter is the largest planet in our solar system. Saturn is known for its prominent ring system.
+
+Example 4 - Addition with ignored reformatting:
+Diff:
+-The Amazon River flows through South America.
++The Amazon River flows through South America and is the largest river by discharge volume.
+
+Your output:
+The Amazon River is the largest river by discharge volume.
+
+Example 5 - Genuine deletion:
+Diff:
+-Pluto is the ninth planet from the Sun.
+
+Your output:
+Information stating Pluto is the ninth planet from the Sun was removed from {context['document_uri']}.
 """
     return [
         Message(role='system', content=sys_prompt),
