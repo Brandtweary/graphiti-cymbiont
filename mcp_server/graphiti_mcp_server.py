@@ -673,15 +673,6 @@ async def initialize_graphiti():
                 f'Document watcher started for {corpus_path} '
                 f'(sync interval: {sync_interval}h)'
             )
-
-            # Perform initial sync on startup
-            logger.info('Performing initial document sync...')
-            initial_sync_result = await sync_manager.sync_all()
-            logger.info(
-                f'Initial sync complete: {initial_sync_result["synced"]} synced, '
-                f'{initial_sync_result["skipped"]} skipped, '
-                f'{len(initial_sync_result["errors"])} errors'
-            )
         else:
             logger.info('CORPUS_PATH not set - document sync disabled')
 
@@ -1369,6 +1360,25 @@ async def run_mcp_server():
     """Run the MCP server in the current event loop."""
     # Initialize the server
     mcp_config = await initialize_server()
+
+    # Set to store background tasks (prevents garbage collection)
+    background_tasks: set[asyncio.Task] = set()
+
+    # Run initial document sync in background if sync_manager exists
+    if sync_manager is not None:
+
+        async def run_initial_sync():
+            """Background task to sync all documents on startup."""
+            logger.info('Starting initial document sync in background...')
+            result = await sync_manager.sync_all()
+            logger.info(
+                f'Background sync complete: {result["synced"]} synced, '
+                f'{result["skipped"]} skipped, {len(result["errors"])} errors'
+            )
+
+        task = asyncio.create_task(run_initial_sync())
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
     try:
         # Run the server with stdio transport for MCP in the same event loop
