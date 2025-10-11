@@ -234,6 +234,7 @@ class DocumentSyncManager:
             if latest_episode:
                 old_hash = latest_episode.metadata.get('content_hash')
                 if old_hash == new_hash:
+                    logger.info(f'Document {uri} - SKIPPED: content unchanged')
                     return {
                         'status': 'skipped',
                         'uri': uri,
@@ -244,6 +245,7 @@ class DocumentSyncManager:
                 full_sync_episode = await self.get_latest_full_sync_for_document(uri)
 
                 if full_sync_episode:
+                    logger.info(f'Document {uri} - content changed, generating diff sync')
                     # Generate REAL diff: old document vs new document
                     old_content = full_sync_episode.content
                     diff_content = generate_unified_diff(old_content, content, uri)
@@ -265,10 +267,12 @@ class DocumentSyncManager:
                     await full_sync_episode.save(self.graphiti.driver)
                 else:
                     # No full sync found - treat as new document
+                    logger.info(f'Document {uri} - no full sync found, performing full sync')
                     episode_body = f'Document: {uri}\n\n{content}'
                     sync_type = 'full'
             else:
                 # First sync ever
+                logger.info(f'Document {uri} - first sync, performing full sync')
                 episode_body = f'Document: {uri}\n\n{content}'
                 sync_type = 'full'
 
@@ -290,6 +294,7 @@ class DocumentSyncManager:
                 group_id=self.group_id,
                 metadata=metadata,
             )
+            logger.info(f'Document {uri} - synced successfully ({sync_type})')
 
             return {
                 'status': 'synced',
@@ -398,6 +403,7 @@ class DocumentSyncManager:
 
         # Find all .md files in corpus
         md_files = list(self.corpus_path.rglob('*.md'))
+        logger.info(f'Starting sync_all for {len(md_files)} markdown files')
 
         for file_path in md_files:
             result = await self.sync_document(file_path)

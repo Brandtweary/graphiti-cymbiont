@@ -10,7 +10,6 @@ from graphiti_core.document_sync import DocumentSyncManager, DocumentWatcher
 from graph_service.dto import (
     StartSyncRequest,
     SyncActionResponse,
-    SyncStatsResponse,
     SyncStatusResponse,
 )
 from graph_service.zep_graphiti import ZepGraphitiDep
@@ -115,12 +114,10 @@ async def stop_sync() -> SyncActionResponse:
 
 
 @router.post('/trigger', status_code=status.HTTP_200_OK)
-async def trigger_sync(async_mode: bool = True) -> SyncActionResponse | SyncStatsResponse:
+async def trigger_sync() -> SyncActionResponse:
     """Manually trigger document synchronization.
 
-    Args:
-        async_mode: If True (default), returns immediately and runs sync in background.
-                   If False, waits for sync to complete and returns full stats.
+    Always runs asynchronously in background (sync takes 30+ seconds per document).
     """
     global sync_manager
 
@@ -130,36 +127,23 @@ async def trigger_sync(async_mode: bool = True) -> SyncActionResponse | SyncStat
             message='Document sync not initialized (call /sync/start first)',
         )
 
-    if async_mode:
-        # Run sync in background
-        async def run_sync():
-            try:
-                result = await sync_manager.sync_all()
-                logger.info(
-                    f'Manual sync completed: {result["synced"]} synced, '
-                    f'{result["skipped"]} skipped, {len(result["errors"])} errors'
-                )
-            except Exception as e:
-                logger.error(f'Error during manual sync: {e}')
+    # Run sync in background
+    async def run_sync():
+        try:
+            result = await sync_manager.sync_all()
+            logger.info(
+                f'Manual sync completed: {result["synced"]} synced, '
+                f'{result["skipped"]} skipped, {len(result["errors"])} errors'
+            )
+        except Exception as e:
+            logger.error(f'Error during manual sync: {e}')
 
-        asyncio.create_task(run_sync())
+    asyncio.create_task(run_sync())
 
-        return SyncActionResponse(
-            status='triggered',
-            message='Document sync started in background',
-        )
-    else:
-        # Run sync synchronously and return stats
-        result = await sync_manager.sync_all()
-        logger.info(
-            f'Manual sync completed: {result["synced"]} synced, '
-            f'{result["skipped"]} skipped, {len(result["errors"])} errors'
-        )
-        return SyncStatsResponse(
-            synced=result['synced'],
-            skipped=result['skipped'],
-            errors=result['errors'],
-        )
+    return SyncActionResponse(
+        status='triggered',
+        message='Document sync started in background',
+    )
 
 
 @router.get('/status', status_code=status.HTTP_200_OK)

@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,9 +9,29 @@ from graph_service.routers import ingest, retrieve, sync
 from graph_service.zep_graphiti import initialize_graphiti
 
 
+def setup_logging(log_file: str | None):
+    """Configure logging to file if log_file is specified"""
+    if log_file:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, mode='a'),
+                logging.StreamHandler()  # Keep console output for uvicorn
+            ]
+        )
+    else:
+        # Default logging to stdout only
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
+    setup_logging(settings.log_file)
     await initialize_graphiti(settings)
     yield
     # Shutdown
