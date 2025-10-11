@@ -2,10 +2,18 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, status
 
+from graphiti_core.search.search_config_recipes import (
+    NODE_HYBRID_SEARCH_NODE_DISTANCE,
+    NODE_HYBRID_SEARCH_RRF,
+)
+from graphiti_core.search.search_filters import SearchFilters
+
 from graph_service.dto import (
     GetMemoryRequest,
     GetMemoryResponse,
     Message,
+    NodeSearchQuery,
+    NodeSearchResults,
     SearchQuery,
     SearchResults,
 )
@@ -25,6 +33,52 @@ async def search(query: SearchQuery, graphiti: ZepGraphitiDep):
     return SearchResults(
         facts=facts,
     )
+
+
+@router.post('/search/nodes', status_code=status.HTTP_200_OK)
+async def search_nodes(query: NodeSearchQuery, graphiti: ZepGraphitiDep):
+    # Configure search strategy based on center_node_uuid
+    if query.center_node_uuid is not None:
+        search_config = NODE_HYBRID_SEARCH_NODE_DISTANCE.model_copy(deep=True)
+    else:
+        search_config = NODE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+
+    search_config.limit = query.max_nodes
+
+    # Build search filters
+    filters = SearchFilters()
+    if query.entity is not None and query.entity != '':
+        filters.node_labels = [query.entity]
+
+    # Perform search
+    search_results = await graphiti.search_(
+        query=query.query,
+        config=search_config,
+        group_ids=query.group_ids,
+        center_node_uuid=query.center_node_uuid,
+        search_filter=filters,
+    )
+
+    if not search_results.nodes:
+        return NodeSearchResults(nodes=[])
+
+    # Format node results
+    from graph_service.dto import NodeResult
+
+    formatted_nodes = [
+        NodeResult(
+            uuid=node.uuid,
+            name=node.name,
+            summary=node.summary if hasattr(node, 'summary') else '',
+            labels=node.labels if hasattr(node, 'labels') else [],
+            group_id=node.group_id,
+            created_at=node.created_at,
+            attributes=node.attributes if hasattr(node, 'attributes') else {},
+        )
+        for node in search_results.nodes
+    ]
+
+    return NodeSearchResults(nodes=formatted_nodes)
 
 
 @router.get('/entity-edge/{uuid}', status_code=status.HTTP_200_OK)

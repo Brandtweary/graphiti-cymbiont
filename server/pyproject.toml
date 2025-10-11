@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.4.0",
     "uvicorn>=0.30.6",
     "httpx>=0.28.1",
+    "watchdog>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +62,9 @@ ignore = ["E501"]
 quote-style = "single"
 indent-style = "space"
 docstring-code-format = true
+
+[tool.uv.sources]
+graphiti-core = { path = "..", editable = true }
 
 [tool.pyright]
 include = ["."]
