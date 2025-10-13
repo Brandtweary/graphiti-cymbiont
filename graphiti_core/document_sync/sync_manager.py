@@ -212,6 +212,79 @@ class DocumentSyncManager:
 
         return None
 
+    async def find_episode_by_content_hash(
+        self, content_hash: str, exclude_uri: str
+    ) -> EpisodicNode | None:
+        """Find episode with matching content hash but different URI (indicates rename).
+
+        This enables rename detection even when watchdog events are missed (server downtime,
+        bulk operations, etc). If a file with identical content appears at a new location,
+        it's likely a rename rather than a new document.
+
+        Args:
+            content_hash: SHA256 hash to search for
+            exclude_uri: Current URI to exclude from search
+
+        Returns:
+            Episode with matching hash from different URI, or None if not found
+        """
+        # Search for episodes with this content hash
+        hash_pattern = f'"content_hash": "{content_hash}"'
+        # Exclude episodes with the current URI
+        exclude_pattern = f'"document_uri": "{exclude_uri}"'
+
+        query = """
+        MATCH (e:Episodic)
+        WHERE e.group_id = $group_id
+          AND e.metadata IS NOT NULL
+          AND e.metadata CONTAINS $hash_pattern
+          AND NOT e.metadata CONTAINS $exclude_pattern
+        RETURN e
+        ORDER BY e.created_at DESC
+        LIMIT 1
+        """
+
+        try:
+            records, _, _ = await self.graphiti.driver.execute_query(
+                query,
+                group_id=self.group_id,
+                hash_pattern=hash_pattern,
+                exclude_pattern=exclude_pattern,
+            )
+
+            if records and len(records) > 0:
+                record = records[0]
+                episode_data = record['e']
+
+                # Convert Neo4j datetime objects
+                created_at = episode_data['created_at']
+                if hasattr(created_at, 'to_native'):
+                    created_at = created_at.to_native()
+
+                valid_at = episode_data['valid_at']
+                if hasattr(valid_at, 'to_native'):
+                    valid_at = valid_at.to_native()
+
+                return EpisodicNode(
+                    uuid=episode_data['uuid'],
+                    name=episode_data['name'],
+                    group_id=episode_data['group_id'],
+                    created_at=created_at,
+                    source=EpisodeType(episode_data['source']),
+                    source_description=episode_data.get('source_description', ''),
+                    content=episode_data['content'],
+                    valid_at=valid_at,
+                    entity_edges=episode_data.get('entity_edges', []),
+                    metadata=json.loads(episode_data['metadata'])
+                    if episode_data.get('metadata')
+                    else {},
+                )
+        except Exception as e:
+            logger.error(f'Error querying for content hash {content_hash}: {e}')
+            return None
+
+        return None
+
     async def sync_document(self, file_path: Path) -> dict[str, Any]:
         """Sync a single document to the knowledge graph.
 
@@ -272,10 +345,68 @@ class DocumentSyncManager:
                     episode_body = f'Document: {uri}\n\n{content}'
                     sync_type = 'full'
             else:
-                # First sync ever
-                logger.info(f'Document {uri} - first sync, performing full sync')
-                episode_body = f'Document: {uri}\n\n{content}'
-                sync_type = 'full'
+                # No episode found for current URI - check if this is a rename
+                renamed_episode = await self.find_episode_by_content_hash(new_hash, uri)
+
+                if renamed_episode:
+                    # Found episode with same content at different location - this is a rename
+                    old_uri = renamed_episode.metadata.get('document_uri')
+                    logger.info(
+                        f'Document {uri} - detected rename via content hash: {old_uri} → {uri}'
+                    )
+
+                    # Update all episode URIs for this document
+                    await self.handle_rename(old_uri, uri)
+
+                    # Now re-check for episodes with updated URI
+                    latest_episode = await self.get_latest_episode_for_document(uri)
+
+                    if latest_episode:
+                        # Episodes updated successfully, check if content changed
+                        old_hash = latest_episode.metadata.get('content_hash')
+                        if old_hash == new_hash:
+                            # Content unchanged after rename
+                            logger.info(f'Document {uri} - SKIPPED: renamed, content unchanged')
+                            return {
+                                'status': 'skipped',
+                                'uri': uri,
+                                'reason': 'renamed_unchanged',
+                            }
+
+                        # Content changed after rename - generate diff
+                        full_sync_episode = await self.get_latest_full_sync_for_document(uri)
+                        if full_sync_episode:
+                            logger.info(f'Document {uri} - content changed after rename')
+                            old_content = full_sync_episode.content
+                            diff_content = generate_unified_diff(old_content, content, uri)
+                            summary = await summarize_diff(
+                                self.graphiti.llm_client,
+                                diff_content,
+                                uri,
+                            )
+                            episode_body = summary
+                            sync_type = 'diff'
+                            full_sync_episode.content = content
+                            await full_sync_episode.save(self.graphiti.driver)
+                        else:
+                            # Shouldn't happen, but handle gracefully
+                            logger.warning(
+                                f'Document {uri} - no full sync after rename, performing full sync'
+                            )
+                            episode_body = f'Document: {uri}\n\n{content}'
+                            sync_type = 'full'
+                    else:
+                        # Rename failed somehow, treat as new document
+                        logger.warning(
+                            f'Document {uri} - rename detected but update failed, treating as new'
+                        )
+                        episode_body = f'Document: {uri}\n\n{content}'
+                        sync_type = 'full'
+                else:
+                    # Truly first sync - no existing episodes with this content
+                    logger.info(f'Document {uri} - first sync, performing full sync')
+                    episode_body = f'Document: {uri}\n\n{content}'
+                    sync_type = 'full'
 
             # Create episode metadata
             metadata = {

@@ -181,7 +181,7 @@ class DocumentWatcher:
             self.rename_queue.append((old_uri, new_uri))
 
     async def _periodic_sync(self):
-        """Background task: sleep → process queues → repeat."""
+        """Background task: sleep → sync all documents → repeat."""
         try:
             while self._running:
                 await asyncio.sleep(self.sync_interval)
@@ -189,7 +189,9 @@ class DocumentWatcher:
                 if not self._running:
                     break
 
-                await self._process_queues()
+                # Use sync_all - it scans all files with content-hash deduplication
+                # and built-in rename detection
+                await self.sync_manager.sync_all()
 
         except asyncio.CancelledError:
             raise
@@ -223,5 +225,5 @@ class DocumentWatcher:
             await self.sync_manager.sync_document(file_path)
 
     async def trigger_sync(self):
-        """Manually trigger sync of queued changes."""
-        await self._process_queues()
+        """Manually trigger sync of all documents."""
+        await self.sync_manager.sync_all()
