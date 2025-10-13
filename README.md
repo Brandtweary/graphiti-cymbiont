@@ -1,3 +1,5 @@
+> **Note:** This is a fork of [Graphiti](https://github.com/getzep/graphiti) maintained for the [Cymbiont](https://github.com/Brandtweary/cymbiont) project. For the official upstream repository, see [getzep/graphiti](https://github.com/getzep/graphiti).
+
 <p align="center">
   <a href="https://www.getzep.com/">
     <img src="https://github.com/user-attachments/assets/119c5682-9654-4257-8922-56b7cb8ffd73" width="150" alt="Zep Logo">
