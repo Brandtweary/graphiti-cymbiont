@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from graphiti_core import Graphiti
+from graphiti_core.helpers import semaphore_gather
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 
 from .diff_generator import compute_content_hash, generate_unified_diff
@@ -405,9 +406,13 @@ class DocumentSyncManager:
         md_files = list(self.corpus_path.rglob('*.md'))
         logger.info(f'Starting sync_all for {len(md_files)} markdown files')
 
-        for file_path in md_files:
-            result = await self.sync_document(file_path)
+        # Parallel execution with semaphore bounding
+        results = await semaphore_gather(
+            *[self.sync_document(file_path) for file_path in md_files]
+        )
 
+        # Aggregate results
+        for result in results:
             if result['status'] == 'synced':
                 synced += 1
             elif result['status'] == 'skipped':
