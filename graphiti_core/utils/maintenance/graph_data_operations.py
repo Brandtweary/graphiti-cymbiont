@@ -42,6 +42,8 @@ async def build_indices_and_constraints(driver: GraphDriver, delete_existing: bo
     # Don't create fulltext indices if search_interface is being used
     if not driver.search_interface:
         fulltext_indices: list[LiteralString] = get_fulltext_indices(driver.provider)
+    else:
+        fulltext_indices = []
 
     if driver.provider == GraphProvider.KUZU:
         # Skip creating fulltext indices if they already exist. Need to do this manually

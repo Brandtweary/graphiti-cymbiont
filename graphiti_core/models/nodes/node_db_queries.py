@@ -333,3 +333,68 @@ COMMUNITY_NODE_RETURN_NEPTUNE = """
     n.summary AS summary,
     n.created_at AS created_at
 """
+
+
+def get_document_node_save_query(provider: GraphProvider) -> str:
+    match provider:
+        case GraphProvider.FALKORDB | GraphProvider.KUZU | GraphProvider.NEPTUNE:
+            return """
+                MERGE (d:Document {uri: $uri, group_id: $group_id})
+                SET d.uuid = $uuid, d.name = $name, d.content = $content,
+                    d.content_hash = $content_hash, d.last_sync_at = $last_sync_at,
+                    d.last_chunk_at = $last_chunk_at, d.created_at = $created_at
+                RETURN d.uuid AS uuid
+            """
+        case _:  # Neo4j
+            return """
+                MERGE (d:Document {uri: $uri, group_id: $group_id})
+                SET d.uuid = $uuid, d.name = $name, d.content = $content,
+                    d.content_hash = $content_hash, d.last_sync_at = $last_sync_at,
+                    d.last_chunk_at = $last_chunk_at, d.created_at = $created_at
+                RETURN d.uuid AS uuid
+            """
+
+
+def get_chunk_node_save_query(provider: GraphProvider) -> str:
+    match provider:
+        case GraphProvider.FALKORDB | GraphProvider.KUZU | GraphProvider.NEPTUNE:
+            return """
+                MERGE (c:Chunk {uuid: $uuid})
+                SET c = {uuid: $uuid, name: $name, group_id: $group_id, content: $content,
+                chunk_index: $chunk_index, total_chunks: $total_chunks, token_count: $token_count,
+                document_uri: $document_uri, created_at: $created_at}
+                RETURN c.uuid AS uuid
+            """
+        case _:  # Neo4j
+            return """
+                MERGE (c:Chunk {uuid: $uuid})
+                SET c = {uuid: $uuid, name: $name, group_id: $group_id, content: $content,
+                chunk_index: $chunk_index, total_chunks: $total_chunks, token_count: $token_count,
+                document_uri: $document_uri, created_at: $created_at}
+                RETURN c.uuid AS uuid
+            """
+
+
+DOCUMENT_NODE_RETURN = """
+    d.uuid AS uuid,
+    d.name AS name,
+    d.group_id AS group_id,
+    d.uri AS uri,
+    d.content AS content,
+    d.content_hash AS content_hash,
+    d.last_sync_at AS last_sync_at,
+    d.last_chunk_at AS last_chunk_at,
+    d.created_at AS created_at
+"""
+
+CHUNK_NODE_RETURN = """
+    c.uuid AS uuid,
+    c.name AS name,
+    c.group_id AS group_id,
+    c.content AS content,
+    c.chunk_index AS chunk_index,
+    c.total_chunks AS total_chunks,
+    c.token_count AS token_count,
+    c.document_uri AS document_uri,
+    c.created_at AS created_at
+"""

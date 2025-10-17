@@ -815,6 +815,238 @@ def get_community_node_from_record(record: Any) -> CommunityNode:
     )
 
 
+class DocumentNode(Node):
+    uri: str = Field(description='document URI relative to corpus root')
+    content: str = Field(description='full document text for diff generation')
+    content_hash: str = Field(description='SHA256 hash with sha256: prefix')
+    last_sync_at: datetime = Field(description='last successful sync timestamp')
+    last_chunk_at: datetime | None = Field(
+        default=None,
+        description='when chunks were last generated (None = never chunked)',
+    )
+
+    async def save(self, driver: GraphDriver):
+        if driver.graph_operations_interface:
+            return await driver.graph_operations_interface.document_node_save(self, driver)
+
+        from graphiti_core.models.nodes.node_db_queries import get_document_node_save_query
+
+        document_args = {
+            'uuid': self.uuid,
+            'name': self.name,
+            'group_id': self.group_id,
+            'uri': self.uri,
+            'content': self.content,
+            'content_hash': self.content_hash,
+            'last_sync_at': self.last_sync_at,
+            'last_chunk_at': self.last_chunk_at,
+            'created_at': self.created_at,
+        }
+
+        result = await driver.execute_query(
+            get_document_node_save_query(driver.provider), **document_args
+        )
+
+        logger.debug(f'Saved DocumentNode to Graph: {self.uuid}')
+        return result
+
+    @classmethod
+    async def get_by_uri(cls, driver: GraphDriver, uri: str, group_id: str):
+        """Get DocumentNode by URI and group_id."""
+        from graphiti_core.models.nodes.node_db_queries import DOCUMENT_NODE_RETURN
+
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (d:Document {uri: $uri, group_id: $group_id})
+            RETURN
+            """
+            + DOCUMENT_NODE_RETURN,
+            uri=uri,
+            group_id=group_id,
+            routing_='r',
+        )
+
+        if len(records) == 0:
+            return None
+
+        return get_document_node_from_record(records[0])
+
+    @classmethod
+    async def find_by_content_hash(
+        cls, driver: GraphDriver, content_hash: str, group_id: str
+    ):
+        """Find DocumentNode by content hash (for rename detection)."""
+        from graphiti_core.models.nodes.node_db_queries import DOCUMENT_NODE_RETURN
+
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (d:Document {content_hash: $content_hash, group_id: $group_id})
+            RETURN
+            """
+            + DOCUMENT_NODE_RETURN,
+            content_hash=content_hash,
+            group_id=group_id,
+            routing_='r',
+        )
+
+        if len(records) == 0:
+            return None
+
+        return get_document_node_from_record(records[0])
+
+    @classmethod
+    async def get_by_uuid(cls, driver: GraphDriver, uuid: str):
+        from graphiti_core.models.nodes.node_db_queries import DOCUMENT_NODE_RETURN
+
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (d:Document {uuid: $uuid})
+            RETURN
+            """
+            + DOCUMENT_NODE_RETURN,
+            uuid=uuid,
+            routing_='r',
+        )
+
+        if len(records) == 0:
+            raise NodeNotFoundError(uuid)
+
+        return get_document_node_from_record(records[0])
+
+
+class ChunkNode(Node):
+    content: str = Field(description='chunk text content')
+    chunk_index: int = Field(description='position in document (0-indexed)')
+    total_chunks: int = Field(description='total chunks for document')
+    token_count: int = Field(description='estimated tokens in chunk')
+    document_uri: str = Field(description='back-reference to document URI')
+
+    async def save(self, driver: GraphDriver):
+        if driver.graph_operations_interface:
+            return await driver.graph_operations_interface.chunk_node_save(self, driver)
+
+        from graphiti_core.models.nodes.node_db_queries import get_chunk_node_save_query
+
+        chunk_args = {
+            'uuid': self.uuid,
+            'name': self.name,
+            'group_id': self.group_id,
+            'content': self.content,
+            'chunk_index': self.chunk_index,
+            'total_chunks': self.total_chunks,
+            'token_count': self.token_count,
+            'document_uri': self.document_uri,
+            'created_at': self.created_at,
+        }
+
+        result = await driver.execute_query(
+            get_chunk_node_save_query(driver.provider), **chunk_args
+        )
+
+        logger.debug(f'Saved ChunkNode to Graph: {self.uuid}')
+        return result
+
+    @classmethod
+    async def get_by_document_uri(
+        cls, driver: GraphDriver, document_uri: str, group_id: str
+    ) -> list['ChunkNode']:
+        """Get all ChunkNodes for a document."""
+        from graphiti_core.models.nodes.node_db_queries import CHUNK_NODE_RETURN
+
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (c:Chunk {document_uri: $document_uri, group_id: $group_id})
+            RETURN
+            """
+            + CHUNK_NODE_RETURN
+            + """
+            ORDER BY c.chunk_index ASC
+            """,
+            document_uri=document_uri,
+            group_id=group_id,
+            routing_='r',
+        )
+
+        return [get_chunk_node_from_record(record) for record in records]
+
+    @classmethod
+    async def delete_by_document_uri(
+        cls, driver: GraphDriver, document_uri: str, group_id: str
+    ):
+        """Delete all ChunkNodes for a document (for chunk regeneration)."""
+        await driver.execute_query(
+            """
+            MATCH (c:Chunk {document_uri: $document_uri, group_id: $group_id})
+            DETACH DELETE c
+            """,
+            document_uri=document_uri,
+            group_id=group_id,
+        )
+        logger.debug(f'Deleted ChunkNodes for document: {document_uri}')
+
+    @classmethod
+    async def get_by_uuid(cls, driver: GraphDriver, uuid: str):
+        from graphiti_core.models.nodes.node_db_queries import CHUNK_NODE_RETURN
+
+        records, _, _ = await driver.execute_query(
+            """
+            MATCH (c:Chunk {uuid: $uuid})
+            RETURN
+            """
+            + CHUNK_NODE_RETURN,
+            uuid=uuid,
+            routing_='r',
+        )
+
+        if len(records) == 0:
+            raise NodeNotFoundError(uuid)
+
+        return get_chunk_node_from_record(records[0])
+
+
+# Node helpers
+def get_document_node_from_record(record: Any) -> DocumentNode:
+    created_at = parse_db_date(record['created_at'])
+    last_sync_at = parse_db_date(record['last_sync_at'])
+    last_chunk_at = parse_db_date(record['last_chunk_at']) if record.get('last_chunk_at') else None
+
+    if created_at is None:
+        raise ValueError(f'created_at cannot be None for document {record.get("uuid", "unknown")}')
+    if last_sync_at is None:
+        raise ValueError(f'last_sync_at cannot be None for document {record.get("uuid", "unknown")}')
+
+    return DocumentNode(
+        uuid=record['uuid'],
+        name=record['name'],
+        group_id=record['group_id'],
+        uri=record['uri'],
+        content=record['content'],
+        content_hash=record['content_hash'],
+        last_sync_at=last_sync_at,
+        last_chunk_at=last_chunk_at,
+        created_at=created_at,
+    )
+
+
+def get_chunk_node_from_record(record: Any) -> ChunkNode:
+    created_at = parse_db_date(record['created_at'])
+
+    if created_at is None:
+        raise ValueError(f'created_at cannot be None for chunk {record.get("uuid", "unknown")}')
+
+    return ChunkNode(
+        uuid=record['uuid'],
+        name=record['name'],
+        group_id=record['group_id'],
+        content=record['content'],
+        chunk_index=record['chunk_index'],
+        total_chunks=record['total_chunks'],
+        token_count=record['token_count'],
+        document_uri=record['document_uri'],
+        created_at=created_at,
+    )
+
+
 async def create_entity_node_embeddings(embedder: EmbedderClient, nodes: list[EntityNode]):
     # filter out falsey values from nodes
     filtered_nodes = [node for node in nodes if node.name]

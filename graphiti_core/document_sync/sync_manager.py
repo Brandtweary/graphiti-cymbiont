@@ -1,34 +1,49 @@
 """Core document synchronization logic.
 
 This module manages the synchronization of markdown documents from a corpus directory
-into the Graphiti knowledge graph. It implements intelligent change detection and
-diff-based updates to maintain an evolving knowledge base.
+into the Graphiti knowledge graph. It implements intelligent change detection with
+document chunking for efficient knowledge extraction.
 
 Key Concepts:
-    Dual Episode Pattern:
-        - Full sync episodes: Authoritative document snapshots (content mutated on updates)
-        - Diff episodes: Semantic summaries of changes for knowledge graph ingestion
+    Three-Tier Architecture:
+        - DocumentNode: Document index with change detection (content hash, timestamps)
+        - EpisodicNode: Append-only history (chunk episodes, diff episodes)
+        - ChunkNode: Retrieval-optimized text fragments (BM25 search)
 
     Change Detection:
+        - DocumentNode-based (replaces episode-based lookup)
         - SHA256 content hashing to detect actual changes
-        - Query graph for previous state (no local cache)
         - Skip sync if content unchanged
+        - Lazy migration for unchunked documents (last_chunk_at == None)
 
-    Diff Strategy:
-        - Compare against latest full sync episode (authoritative snapshot)
-        - Generate unified diff with full context (100 lines)
-        - LLM summarization produces semantic change description
-        - Update full sync episode content via MERGE (mutation for optimization)
+    Initial Sync (New Documents):
+        - Chunk document using Docling HybridChunker (2000 tokens, structure-aware)
+        - Create episode per chunk (goes through LLM extraction)
+        - Create DocumentNode with content/hash
+        - Create ChunkNodes for retrieval
+
+    Update Sync (Changed Documents):
+        - Generate unified diff (old vs new content from DocumentNode)
+        - Create diff episode (LLM summarized, <2000 tokens)
+        - Update DocumentNode (content, hash, timestamps)
+        - Regenerate chunks (delete old, create new ChunkNodes)
+
+    Rename Detection:
+        - Query DocumentNode by content_hash with different URI
+        - Update DocumentNode.uri (single property update)
+        - Check if content also changed after rename
 
     File Operations:
-        - Rename: Update all episode metadata URIs via Cypher
+        - Rename: Update DocumentNode URI
         - Delete: No-op (append-only graph preserves history)
 
 Episode Metadata Schema:
     {
         "document_uri": str,      # Relative to corpus root
         "content_hash": str,      # SHA256 with prefix
-        "sync_type": str,         # "full" | "diff"
+        "sync_type": str,         # "chunk" | "diff"
+        "chunk_index": int,       # (chunk episodes only)
+        "total_chunks": int,      # (chunk episodes only)
         "sync_timestamp": str     # ISO 8601 UTC timestamp
     }
 """
@@ -41,8 +56,10 @@ from typing import Any
 
 from graphiti_core import Graphiti
 from graphiti_core.helpers import semaphore_gather
-from graphiti_core.nodes import EpisodeType, EpisodicNode
+from graphiti_core.nodes import ChunkNode, DocumentNode, EpisodeType, EpisodicNode
+from graphiti_core.utils.datetime_utils import utc_now
 
+from .chunker import chunk_document_for_episodes, chunk_document_for_retrieval
 from .diff_generator import compute_content_hash, generate_unified_diff
 from .diff_summarizer import summarize_diff
 
@@ -288,6 +305,9 @@ class DocumentSyncManager:
     async def sync_document(self, file_path: Path) -> dict[str, Any]:
         """Sync a single document to the knowledge graph.
 
+        Uses DocumentNode for change detection and chunking for episode creation.
+        Creates chunk episodes on initial sync and diff episodes on updates.
+
         Args:
             file_path: Absolute path to document file
 
@@ -301,13 +321,42 @@ class DocumentSyncManager:
             content = file_path.read_text(encoding='utf-8')
             new_hash = compute_content_hash(content)
 
-            # Get latest episode for this document
-            latest_episode = await self.get_latest_episode_for_document(uri)
+            # Query for DocumentNode (replaces episode-based lookup)
+            doc_node = await DocumentNode.get_by_uri(self.graphiti.driver, uri, self.group_id)
 
-            # Check if content has changed
-            if latest_episode:
-                old_hash = latest_episode.metadata.get('content_hash')
-                if old_hash == new_hash:
+            # Check if document exists
+            if doc_node:
+                # Lazy migration: check if document was never chunked
+                if doc_node.last_chunk_at is None:
+                    logger.info(
+                        f'Document {uri} - lazy migration detected (no chunks), generating chunks'
+                    )
+                    # Force re-chunk even if content unchanged
+                    # This handles migration from pre-chunking era
+                    chunks = chunk_document_for_retrieval(str(file_path), uri)
+                    logger.info(f'Document {uri} - created {len(chunks)} retrieval chunks (lazy migration)')
+
+                    reference_time = utc_now()
+                    for chunk in chunks:
+                        chunk_node = ChunkNode(
+                            name=f'{uri}_chunk_{chunk.chunk_index}',
+                            content=chunk.content,
+                            chunk_index=chunk.chunk_index,
+                            total_chunks=chunk.total_chunks,
+                            token_count=chunk.token_count,
+                            document_uri=uri,
+                            group_id=self.group_id,
+                            created_at=reference_time,
+                        )
+                        await chunk_node.save(self.graphiti.driver)
+
+                    # Update last_chunk_at
+                    doc_node.last_chunk_at = reference_time
+                    await doc_node.save(self.graphiti.driver)
+                    logger.info(f'Document {uri} - lazy migration complete')
+
+                # Document exists - check if content changed
+                if doc_node.content_hash == new_hash:
                     logger.info(f'Document {uri} - SKIPPED: content unchanged')
                     return {
                         'status': 'skipped',
@@ -315,125 +364,46 @@ class DocumentSyncManager:
                         'reason': 'unchanged',
                     }
 
-                # Get full sync episode (authoritative document snapshot)
-                full_sync_episode = await self.get_latest_full_sync_for_document(uri)
-
-                if full_sync_episode:
-                    logger.info(f'Document {uri} - content changed, generating diff sync')
-                    # Generate REAL diff: old document vs new document
-                    old_content = full_sync_episode.content
-                    diff_content = generate_unified_diff(old_content, content, uri)
-
-                    # Summarize the diff for ingestion
-                    # The diff summarizer intelligently produces atomic content
-                    summary = await summarize_diff(
-                        self.graphiti.llm_client,
-                        diff_content,
-                        uri,
-                    )
-
-                    # Pass diff summarizer output directly - it's already atomic and ready
-                    episode_body = summary
-                    sync_type = 'diff'
-
-                    # Update full sync episode with new content (mutation for snapshot)
-                    full_sync_episode.content = content
-                    await full_sync_episode.save(self.graphiti.driver)
-                else:
-                    # No full sync found - treat as new document
-                    logger.info(f'Document {uri} - no full sync found, performing full sync')
-                    episode_body = f'Document: {uri}\n\n{content}'
-                    sync_type = 'full'
+                # Content changed - update flow
+                logger.info(f'Document {uri} - content changed, processing update')
+                return await self._handle_document_update(
+                    file_path, uri, content, new_hash, doc_node
+                )
             else:
-                # No episode found for current URI - check if this is a rename
-                renamed_episode = await self.find_episode_by_content_hash(new_hash, uri)
+                # No DocumentNode - check for rename via content hash
+                renamed_doc = await DocumentNode.find_by_content_hash(
+                    self.graphiti.driver, new_hash, self.group_id
+                )
 
-                if renamed_episode:
-                    # Found episode with same content at different location - this is a rename
-                    old_uri = renamed_episode.metadata.get('document_uri')
+                if renamed_doc and renamed_doc.uri != uri:
+                    # Rename detected
+                    old_uri = renamed_doc.uri
                     logger.info(
                         f'Document {uri} - detected rename via content hash: {old_uri} → {uri}'
                     )
 
-                    # Update all episode URIs for this document
-                    await self.handle_rename(old_uri, uri)
+                    # Update DocumentNode URI
+                    renamed_doc.uri = uri
+                    await renamed_doc.save(self.graphiti.driver)
 
-                    # Now re-check for episodes with updated URI
-                    latest_episode = await self.get_latest_episode_for_document(uri)
+                    # Check if content also changed after rename
+                    if renamed_doc.content_hash == new_hash:
+                        logger.info(f'Document {uri} - SKIPPED: renamed, content unchanged')
+                        return {
+                            'status': 'skipped',
+                            'uri': uri,
+                            'reason': 'renamed_unchanged',
+                        }
 
-                    if latest_episode:
-                        # Episodes updated successfully, check if content changed
-                        old_hash = latest_episode.metadata.get('content_hash')
-                        if old_hash == new_hash:
-                            # Content unchanged after rename
-                            logger.info(f'Document {uri} - SKIPPED: renamed, content unchanged')
-                            return {
-                                'status': 'skipped',
-                                'uri': uri,
-                                'reason': 'renamed_unchanged',
-                            }
-
-                        # Content changed after rename - generate diff
-                        full_sync_episode = await self.get_latest_full_sync_for_document(uri)
-                        if full_sync_episode:
-                            logger.info(f'Document {uri} - content changed after rename')
-                            old_content = full_sync_episode.content
-                            diff_content = generate_unified_diff(old_content, content, uri)
-                            summary = await summarize_diff(
-                                self.graphiti.llm_client,
-                                diff_content,
-                                uri,
-                            )
-                            episode_body = summary
-                            sync_type = 'diff'
-                            full_sync_episode.content = content
-                            await full_sync_episode.save(self.graphiti.driver)
-                        else:
-                            # Shouldn't happen, but handle gracefully
-                            logger.warning(
-                                f'Document {uri} - no full sync after rename, performing full sync'
-                            )
-                            episode_body = f'Document: {uri}\n\n{content}'
-                            sync_type = 'full'
-                    else:
-                        # Rename failed somehow, treat as new document
-                        logger.warning(
-                            f'Document {uri} - rename detected but update failed, treating as new'
-                        )
-                        episode_body = f'Document: {uri}\n\n{content}'
-                        sync_type = 'full'
+                    # Content changed after rename
+                    logger.info(f'Document {uri} - content changed after rename')
+                    return await self._handle_document_update(
+                        file_path, uri, content, new_hash, renamed_doc
+                    )
                 else:
-                    # Truly first sync - no existing episodes with this content
-                    logger.info(f'Document {uri} - first sync, performing full sync')
-                    episode_body = f'Document: {uri}\n\n{content}'
-                    sync_type = 'full'
-
-            # Create episode metadata
-            metadata = {
-                'document_uri': uri,
-                'content_hash': new_hash,
-                'sync_type': sync_type,
-                'sync_timestamp': datetime.now(timezone.utc).isoformat(),
-            }
-
-            # Add episode to graph
-            await self.graphiti.add_episode(
-                name=f'Document sync: {uri}',
-                episode_body=episode_body,
-                source_description=f'Document sync from {uri}',
-                reference_time=datetime.now(timezone.utc),
-                source=EpisodeType.text,
-                group_id=self.group_id,
-                metadata=metadata,
-            )
-            logger.info(f'Document {uri} - synced successfully ({sync_type})')
-
-            return {
-                'status': 'synced',
-                'uri': uri,
-                'sync_type': sync_type,
-                'content_hash': new_hash,
-            }
+                    # New document - initial sync
+                    logger.info(f'Document {uri} - first sync, performing initial chunking')
+                    return await self._handle_initial_sync(file_path, uri, content, new_hash)
 
         except Exception as e:
             logger.error(f'Error syncing document {uri}: {e}')
@@ -442,6 +412,232 @@ class DocumentSyncManager:
                 'uri': uri,
                 'error': str(e),
             }
+
+    async def _handle_initial_sync(
+        self, file_path: Path, uri: str, content: str, content_hash: str
+    ) -> dict[str, Any]:
+        """Handle initial sync of a new document with chunking.
+
+        Chunks the document and creates an episode for each chunk.
+        Then creates DocumentNode and ChunkNodes.
+
+        Args:
+            file_path: Absolute path to document file
+            uri: Document URI
+            content: Document content
+            content_hash: SHA256 hash of content
+
+        Returns:
+            Sync result dictionary
+        """
+        # Stage 1: Chunk for episode ingestion (large chunks for LLM context)
+        episode_chunks = chunk_document_for_episodes(str(file_path), uri)
+
+        # Log episode chunk details
+        if episode_chunks:
+            chunk_sizes = [c.token_count for c in episode_chunks]
+            logger.info(
+                f'Document {uri} - created {len(episode_chunks)} episode chunks for LLM ingestion: '
+                f'sizes={chunk_sizes[0]}-{chunk_sizes[-1]} tokens, '
+                f'avg={sum(chunk_sizes)/len(chunk_sizes):.0f} tokens'
+            )
+        else:
+            logger.info(f'Document {uri} - no episode chunks created (empty document?)')
+
+        # Create episode for each chunk (goes through LLM extraction)
+        reference_time = utc_now()
+        for chunk in episode_chunks:
+            episode_name = f'Document chunk: {uri} [{chunk.chunk_index + 1}/{chunk.total_chunks}]'
+            episode_body = f'Document: {uri}\nChunk {chunk.chunk_index + 1} of {chunk.total_chunks}\n\n{chunk.content}'
+
+            metadata = {
+                'document_uri': uri,
+                'content_hash': content_hash,
+                'sync_type': 'chunk',
+                'chunk_index': chunk.chunk_index,
+                'total_chunks': chunk.total_chunks,
+                'sync_timestamp': reference_time.isoformat(),
+            }
+
+            await self.graphiti.add_episode(
+                name=episode_name,
+                episode_body=episode_body,
+                source_description=f'Document chunk from {uri}',
+                reference_time=reference_time,
+                source=EpisodeType.text,
+                group_id=self.group_id,
+                metadata=metadata,
+            )
+
+        # Create DocumentNode
+        doc_node = DocumentNode(
+            name=uri,
+            uri=uri,
+            content=content,
+            content_hash=content_hash,
+            last_sync_at=reference_time,
+            last_chunk_at=reference_time,
+            group_id=self.group_id,
+            created_at=reference_time,
+        )
+        await doc_node.save(self.graphiti.driver)
+        logger.info(f'Document {uri} - created DocumentNode')
+
+        # Stage 2: Chunk for retrieval (small chunks for search)
+        retrieval_chunks = chunk_document_for_retrieval(str(file_path), uri)
+
+        # Create ChunkNodes
+        for chunk in retrieval_chunks:
+            chunk_node = ChunkNode(
+                name=f'{uri}_chunk_{chunk.chunk_index}',
+                content=chunk.content,
+                chunk_index=chunk.chunk_index,
+                total_chunks=chunk.total_chunks,
+                token_count=chunk.token_count,
+                document_uri=uri,
+                group_id=self.group_id,
+                created_at=reference_time,
+            )
+            await chunk_node.save(self.graphiti.driver)
+
+        logger.info(f'Document {uri} - created {len(retrieval_chunks)} retrieval ChunkNodes')
+        logger.info(f'Document {uri} - initial sync complete')
+
+        return {
+            'status': 'synced',
+            'uri': uri,
+            'sync_type': 'initial',
+            'content_hash': content_hash,
+            'episode_chunk_count': len(episode_chunks),
+            'retrieval_chunk_count': len(retrieval_chunks),
+        }
+
+    async def _handle_document_update(
+        self,
+        file_path: Path,
+        uri: str,
+        content: str,
+        content_hash: str,
+        doc_node: DocumentNode,
+    ) -> dict[str, Any]:
+        """Handle update of existing document.
+
+        Generates diff, chunks it (usually 1 chunk), and creates diff episodes.
+        Always regenerates ChunkNodes from new content.
+
+        Args:
+            file_path: Absolute path to document file
+            uri: Document URI
+            content: New document content
+            content_hash: SHA256 hash of new content
+            doc_node: Existing DocumentNode
+
+        Returns:
+            Sync result dictionary
+        """
+        # Generate diff
+        old_content = doc_node.content
+        diff_content = generate_unified_diff(old_content, content, uri)
+
+        # Chunk the diff (reuse Docling to ensure episodes don't exceed LLM context window)
+        # Write diff to temp file for chunking
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as tmp_file:
+            tmp_file.write(diff_content)
+            tmp_path = tmp_file.name
+
+        try:
+            diff_chunks = chunk_document_for_episodes(tmp_path, uri)
+
+            # Log diff episode chunk details
+            if diff_chunks:
+                chunk_sizes = [c.token_count for c in diff_chunks]
+                logger.info(
+                    f'Document {uri} - chunked diff into {len(diff_chunks)} episode chunks: '
+                    f'sizes={chunk_sizes[0]}-{chunk_sizes[-1]} tokens, '
+                    f'avg={sum(chunk_sizes)/len(chunk_sizes):.0f} tokens'
+                )
+            else:
+                logger.info(f'Document {uri} - no diff chunks (empty diff?)')
+        finally:
+            # Clean up temp file
+            Path(tmp_path).unlink()
+
+        # Create episode for each diff chunk
+        reference_time = utc_now()
+        for chunk in diff_chunks:
+            episode_name = f'Document diff: {uri}'
+            if len(diff_chunks) > 1:
+                episode_name += f' [{chunk.chunk_index + 1}/{chunk.total_chunks}]'
+
+            # Summarize this diff chunk
+            summary = await summarize_diff(
+                self.graphiti.llm_client,
+                chunk.content,
+                uri,
+            )
+
+            metadata = {
+                'document_uri': uri,
+                'content_hash': content_hash,
+                'sync_type': 'diff',
+                'chunk_index': chunk.chunk_index if len(diff_chunks) > 1 else None,
+                'total_chunks': chunk.total_chunks if len(diff_chunks) > 1 else None,
+                'sync_timestamp': reference_time.isoformat(),
+            }
+
+            # Create diff episode (append-only)
+            await self.graphiti.add_episode(
+                name=episode_name,
+                episode_body=summary,
+                source_description=f'Document diff from {uri}',
+                reference_time=reference_time,
+                source=EpisodeType.text,
+                group_id=self.group_id,
+                metadata=metadata,
+            )
+
+        # Update DocumentNode
+        doc_node.content = content
+        doc_node.content_hash = content_hash
+        doc_node.last_sync_at = reference_time
+        doc_node.last_chunk_at = reference_time
+        await doc_node.save(self.graphiti.driver)
+        logger.info(f'Document {uri} - updated DocumentNode')
+
+        # Regenerate ChunkNodes from new content
+        # Delete old chunks
+        await ChunkNode.delete_by_document_uri(self.graphiti.driver, uri, self.group_id)
+        logger.info(f'Document {uri} - deleted old chunks')
+
+        # Create new retrieval chunks
+        chunks = chunk_document_for_retrieval(str(file_path), uri)
+        logger.info(f'Document {uri} - created {len(chunks)} new retrieval chunks')
+
+        for chunk in chunks:
+            chunk_node = ChunkNode(
+                name=f'{uri}_chunk_{chunk.chunk_index}',
+                content=chunk.content,
+                chunk_index=chunk.chunk_index,
+                total_chunks=chunk.total_chunks,
+                token_count=chunk.token_count,
+                document_uri=uri,
+                group_id=self.group_id,
+                created_at=reference_time,
+            )
+            await chunk_node.save(self.graphiti.driver)
+
+        logger.info(f'Document {uri} - update complete')
+
+        return {
+            'status': 'synced',
+            'uri': uri,
+            'sync_type': 'diff',
+            'content_hash': content_hash,
+            'retrieval_chunk_count': len(chunks),
+            'diff_episode_count': len(diff_chunks),
+        }
 
     async def handle_rename(self, old_uri: str, new_uri: str) -> dict[str, Any]:
         """Update all episode metadata URIs when file is renamed.

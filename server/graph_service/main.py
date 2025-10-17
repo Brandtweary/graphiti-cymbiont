@@ -5,19 +5,23 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from graph_service.config import get_settings
-from graph_service.routers import ingest, retrieve, sync
+from graph_service.routers import chunks, ingest, retrieve, sync
 from graph_service.zep_graphiti import initialize_graphiti
 
 
 def setup_logging(log_file: str | None):
-    """Configure logging to file if log_file is specified"""
+    """Configure logging to file only (stderr captured separately by launcher)
+
+    Application logs go to file via FileHandler.
+    Python errors/tracebacks go to stderr, which the Cymbiont launcher
+    redirects to the same log file for consolidated chronological output.
+    """
     if log_file:
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(log_file, mode='a'),
-                logging.StreamHandler()  # Keep console output for uvicorn
             ]
         )
     else:
@@ -44,6 +48,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(retrieve.router)
 app.include_router(ingest.router)
 app.include_router(sync.router)
+app.include_router(chunks.router, prefix='/chunks', tags=['chunks'])
 
 
 @app.get('/healthcheck')

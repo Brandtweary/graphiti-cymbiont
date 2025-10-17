@@ -49,12 +49,17 @@ def get_range_indices(provider: GraphProvider) -> list[LiteralString]:
         'CREATE INDEX entity_uuid IF NOT EXISTS FOR (n:Entity) ON (n.uuid)',
         'CREATE INDEX episode_uuid IF NOT EXISTS FOR (n:Episodic) ON (n.uuid)',
         'CREATE INDEX community_uuid IF NOT EXISTS FOR (n:Community) ON (n.uuid)',
+        'CREATE INDEX document_uuid IF NOT EXISTS FOR (n:Document) ON (n.uuid)',
+        'CREATE INDEX chunk_uuid IF NOT EXISTS FOR (n:Chunk) ON (n.uuid)',
         'CREATE INDEX relation_uuid IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.uuid)',
         'CREATE INDEX mention_uuid IF NOT EXISTS FOR ()-[e:MENTIONS]-() ON (e.uuid)',
         'CREATE INDEX has_member_uuid IF NOT EXISTS FOR ()-[e:HAS_MEMBER]-() ON (e.uuid)',
         'CREATE INDEX entity_group_id IF NOT EXISTS FOR (n:Entity) ON (n.group_id)',
         'CREATE INDEX episode_group_id IF NOT EXISTS FOR (n:Episodic) ON (n.group_id)',
         'CREATE INDEX community_group_id IF NOT EXISTS FOR (n:Community) ON (n.group_id)',
+        'CREATE INDEX document_uri_group IF NOT EXISTS FOR (n:Document) ON (n.uri, n.group_id)',
+        'CREATE INDEX document_hash IF NOT EXISTS FOR (n:Document) ON (n.content_hash)',
+        'CREATE INDEX chunk_document_uri IF NOT EXISTS FOR (n:Chunk) ON (n.document_uri, n.group_id)',
         'CREATE INDEX relation_group_id IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.group_id)',
         'CREATE INDEX mention_group_id IF NOT EXISTS FOR ()-[e:MENTIONS]-() ON (e.group_id)',
         'CREATE INDEX name_entity_index IF NOT EXISTS FOR (n:Entity) ON (n.name)',
@@ -122,6 +127,8 @@ def get_fulltext_indices(provider: GraphProvider) -> list[LiteralString]:
         FOR (n:Entity) ON EACH [n.name, n.summary, n.group_id]""",
         """CREATE FULLTEXT INDEX community_name IF NOT EXISTS
         FOR (n:Community) ON EACH [n.name, n.group_id]""",
+        """CREATE FULLTEXT INDEX chunk_content IF NOT EXISTS
+        FOR (c:Chunk) ON EACH [c.content, c.group_id]""",
         """CREATE FULLTEXT INDEX edge_name_and_fact IF NOT EXISTS
         FOR ()-[e:RELATES_TO]-() ON EACH [e.name, e.fact, e.group_id]""",
     ]
